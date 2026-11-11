@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 运行时产物
+uploads/
+server_*.log
+*.log
+
+# 模型权重与数据集（超 GitHub 限制，见 README 模型说明）
+*.pt
+datasets/
+runs/
+
+# 编辑器与工具
+.vscode/
+.idea/
+.zcode/
