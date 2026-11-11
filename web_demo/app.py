@@ -49,8 +49,9 @@ def validate_stream_url(value):
     allowed = (address.is_loopback or
                any(address in net for net in (ipaddress.ip_network('10.0.0.0/8'),
                    ipaddress.ip_network('172.16.0.0/12'),ipaddress.ip_network('192.168.0.0/16'))))
-    if not allowed: raise ValueError('只支持本机或局域网摄像头地址。')
-    _ = url.port  # Validate malformed ports before starting a capture thread.
+    if not allowed: raise ValueError('只支持本机或局域网 IP，不支持公网地址。')
+    try: _ = url.port  # 提前校验畸形端口，再启动采集线程
+    except ValueError: raise ValueError('视频流地址端口不正确。')
     return value
 
 
@@ -74,6 +75,8 @@ class Detector:
                 self.models[mode] = YOLO(MODELS[mode])
             model = self.models[mode]
             began = time.perf_counter()
+            # persist=True 的跟踪器状态挂在共享 model 对象上，跨会话延续：
+            # 换源后 id 不清零属已知行为（引擎每会话新建，无计数串扰）
             if track:
                 result = model.track(frame,conf=conf,imgsz=640,device=self.device,
                                      persist=True,tracker='bytetrack.yaml',verbose=False)[0]
@@ -82,7 +85,8 @@ class Detector:
             elapsed = (time.perf_counter()-began)*1000
             objects = []
             for i,box in enumerate(result.boxes):
-                class_id = int(box.cls.item()); name = model.names[class_id]
+                class_id = int(box.cls.item())
+                name = model.names.get(class_id) or f'未知类别{class_id}'
                 xy = [round(float(v),1) for v in box.xyxy[0].tolist()]
                 center = (xy[0]+xy[2])/(2*frame.shape[1])
                 label = LABELS.get(name,name)
@@ -104,6 +108,8 @@ def frame_result(detector, frame, conf, mode, engine=None, track=False):
         decorated,warning = engine.observe(result['objects'],frame.shape[1],frame.shape[0])
         result['objects'] = decorated
         result['warning'] = warning
+    else:
+        result['warning'] = None  # 契约恒定：前端可无判断读取该键
     ok,encoded = cv2.imencode('.jpg',frame,[cv2.IMWRITE_JPEG_QUALITY,85])
     if not ok: raise ValueError('图像编码失败。')
     return result | {'image':'data:image/jpeg;base64,'+base64.b64encode(encoded).decode(),
@@ -122,12 +128,19 @@ class LiveState:
         self.uploads={}; self.thread=None; self.event=threading.Event()
         self.lock=threading.Lock(); self.control=threading.Lock()
         self.snapshot={'id':None,'status':'idle','sequence':0}
+        self.active_upload=None     # 当前会话正在读的上传副本，剪除时跳过
+        self.pending_cleanup=set()  # Windows 下被占用删不掉的副本，会话结束后补删
 
     def stop(self):
         self.event.set()
         if self.thread and self.thread.is_alive(): self.thread.join(timeout=6)
         if self.thread and self.thread.is_alive():
             raise ValueError('上一个视频源仍在关闭，请稍后再试。')
+        # 会话已结束：补删之前因文件占用没删掉的副本（排除新会话在用的）
+        for path in list(self.pending_cleanup):
+            if str(path) != str(self.active_upload or ''):
+                try: path.unlink(); self.pending_cleanup.discard(path)
+                except OSError: pass
 
     def start(self, data):
         conf,mode=settings(data)
@@ -142,6 +155,8 @@ class LiveState:
         with self.control:
             self.stop()
             self.event=threading.Event(); session=uuid.uuid4().hex
+            # 记录本会话在用的上传副本，避免并发上传的剪除误删在用文件
+            self.active_upload = self.uploads.get(source) if kind == 'video' else None
             with self.lock: self.snapshot={'id':session,'status':'connecting','sequence':0,'kind':kind}
             self.thread=threading.Thread(target=self.run,args=(session,kind,source,conf,mode,self.event),daemon=True)
             self.thread.start()
@@ -239,13 +254,14 @@ class Handler(BaseHTTPRequestHandler):
                         chunk=self.rfile.read(min(1024*1024,remaining))
                         if not chunk: raise ValueError('视频上传中断。')
                         stream.write(chunk);remaining-=len(chunk)
-                state.uploads[ident]=target
-                # 剪除更早的上传副本：服务一次只处理一个视频源，旧副本不可复达
-                for key,value in list(state.uploads.items()):
-                    if key != ident:
-                        state.uploads.pop(key,None)
-                        try: value.unlink()
-                        except OSError: pass
+                # 注册与剪除同锁串行：并发上传不会互相误删；跳过当前会话在用文件
+                with state.control:
+                    state.uploads[ident]=target
+                    for key,value in list(state.uploads.items()):
+                        if key != ident and str(value) != str(state.active_upload or ''):
+                            state.uploads.pop(key,None)
+                            try: value.unlink()
+                            except OSError: state.pending_cleanup.add(value)  # 占用中，停会话后补删
                 self.json_response({'id':ident});return
             raw=self.rfile.read(size)
             if url.path=='/api/image':
@@ -258,6 +274,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path=='/api/start':self.json_response({'id':state.start(json.loads(raw))})
             elif url.path=='/api/stop':
                 expected=json.loads(raw or b'{}').get('id')
+                if not expected: raise ValueError('缺少会话 id，拒绝无条件停止。')
                 with state.control:
                     if expected and expected!=state.snapshot['id']:
                         self.json_response({'status':'already_replaced'});return

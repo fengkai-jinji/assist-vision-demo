@@ -106,15 +106,52 @@ class EngineTests(unittest.TestCase):
         _, third = engine.observe([det('person', [0, 0, 640, 480], ident=1)], 640, 480)
         self.assertIsNotNone(third)
 
-    def test_min_gap_blocks_other_class(self):
+    def test_danger_bypasses_min_gap(self):
         clock, engine = self.make(need_frames=1, min_gap=1.0)
         _, first = engine.observe([det('person', [0, 0, 640, 480], ident=1)], 640, 480)
         _, second = engine.observe([det('chair', [0, 0, 640, 480], ident=2)], 640, 480)
         self.assertIsNotNone(first)
-        self.assertIsNone(second)                           # 全局最小间隔挡住另一个类
+        self.assertIsNotNone(second)                        # 新危险不受全局间隔压制
+        self.assertEqual(second['name'], 'chair')
+
+    def test_near_blocked_by_min_gap(self):
+        clock, engine = self.make(need_frames=1, min_gap=1.0)
+        _, first = engine.observe([det('person', [0, 0, 640, 480], ident=1)], 640, 480)
+        _, second = engine.observe([det('chair', [0, 380, 200, 420], ident=2)], 640, 480)
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)                           # 非危险级被全局间隔节流
         clock.advance(1.5)
-        _, third = engine.observe([det('chair', [0, 0, 640, 480], ident=2)], 640, 480)
+        _, third = engine.observe([det('chair', [0, 380, 200, 420], ident=2)], 640, 480)
         self.assertIsNotNone(third)
+
+    def test_same_frame_same_key_counts_once(self):
+        _, engine = self.make(need_frames=2)
+        # 跟踪器未分配 id 时同类两目标共享键：同帧只计 1 次，单帧不得凑满确认
+        _, spoken = engine.observe(
+            [det('chair', [0, 380, 200, 420]), det('chair', [300, 380, 500, 420])],
+            640, 480)
+        self.assertIsNone(spoken)
+        _, spoken = engine.observe(
+            [det('chair', [0, 380, 200, 420])], 640, 480)
+        self.assertIsNotNone(spoken)                        # 第二帧才确认
+
+    def test_tier_drop_resets_streak(self):
+        _, engine = self.make(need_frames=2)
+        engine.observe([det('chair', [0, 380, 200, 420], ident=1)], 640, 480)   # near，计 1
+        engine.observe([det('chair', [300, 0, 340, 100], ident=1)], 640, 480)   # 掉到远，清零
+        _, spoken = engine.observe([det('chair', [0, 380, 200, 420], ident=1)], 640, 480)
+        self.assertIsNone(spoken)                           # near→远→near 不算连续
+
+    def test_cooldown_falls_back_to_next_candidate(self):
+        clock, engine = self.make(need_frames=1, min_gap=1.0)
+        _, first = engine.observe([det('person', [0, 0, 640, 480], ident=1)], 640, 480)
+        self.assertEqual(first['level'], 'danger')
+        clock.advance(1.5)                                  # person 冷却未到（2s），chair 冷却已可播
+        _, second = engine.observe(
+            [det('person', [0, 0, 640, 480], ident=1),
+             det('chair', [0, 380, 200, 420], ident=2)], 640, 480)
+        self.assertIsNotNone(second)
+        self.assertEqual(second['name'], 'chair')           # 持续危险不无限期压住次优候选
 
     def test_door_is_target_not_danger(self):
         _, engine = self.make(need_frames=1)

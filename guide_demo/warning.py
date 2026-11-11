@@ -7,30 +7,36 @@
 距离分级参照便携推理包 demo/blind_demo.py 的几何方案（非模型输出）：
 检测框底边在画面中的纵向位置（归一化 y2）与框高占画面比例（h）越大，目标越近。
 与参考实现的主要差异：
-1. 播报确认从"连续 2 帧有检测"升级为"同一个 track_id 连续 N 帧处于该等级"，
-   避免两个不同物体各闪一帧凑够确认造成误报；
+1. 播报确认是"同一个目标（track_id 或类别键）连续 N 帧处于可播报等级"：
+   同帧同键只计一次（跟踪器未分配 id 时同类多目标不会单帧凑满），
+   目标掉回中/远等级即清零（near→远→near 不算连续）；
 2. 按类别语义区分角色：门是通行目标（提示不报警），瓶/椅/人是障碍物；
-3. 冷却按（等级, 类别）键控，另有全局最小播报间隔，危险级可打断当前播报。
+3. 冷却按（等级, 类别）键控并逐候选回退——一个持续在场的危险不会无限期
+   压住其他类别已确认的近级播报；危险级播报绕过全局最小间隔（可打断语义），
+   非危险级受全局最小间隔节流。
 """
 import time
 
 # 等级从低到高；tier 为 None 表示"远"，仅显示不播报
 LEVELS = ('mid', 'near', 'danger')
 
-# 每级阈值：底边位置 y2 或框高占比 h 任一达标即判入（与参考实现一致的 OR 口径）
+# 每级阈值：底边位置 y2 或框高占比 h 任一达标即判入（与参考实现一致的 OR 口径）；
+# h 为 None 表示该级不考察框高
 TIERS = {
     'danger': {'y2': 0.88, 'h': 0.55},
     'near': {'y2': 0.66, 'h': 0.34},
     'mid': {'y2': 0.48, 'h': None},
 }
 
-# 类别角色：obstacle 障碍物（正常分级播报）/ target 通行目标（提示不报警）/ quiet 仅显示
+# 类别角色：obstacle 障碍物（near/danger 播报，mid 仅显示）/ target 通行目标
+#（确认后按 mid 级提示）/ quiet 仅显示不参与播报
 DEFAULT_ROLES = {
     'bottle': 'obstacle', 'cup': 'obstacle', 'wine glass': 'obstacle',
     'chair': 'obstacle', 'person': 'obstacle',
     'door': 'target',
     'car': 'quiet', 'truck': 'quiet', 'bus': 'quiet',
 }
+SILENT_ROLES = {'quiet'}
 
 # 类别提级钩子：水坑这类地面障碍进入画面中部（约 3~5 米）就值得按"近"提醒
 DEFAULT_BOOST = {'puddle': 'near'}
@@ -40,8 +46,6 @@ CN_LABELS = {
     'bottle': '瓶子', 'cup': '杯子', 'wine glass': '高脚杯', 'chair': '椅子',
     'door': '门', 'person': '行人', 'puddle': '水坑', 'car': '汽车',
 }
-
-ROLE_MIN_LEVEL = {'obstacle': 'mid', 'target': 'mid', 'quiet': None}
 
 DIRECTION_LEFT, DIRECTION_CENTER, DIRECTION_RIGHT = '左前方', '正前方', '右前方'
 
@@ -103,6 +107,9 @@ class WarningEngine:
         self.clock = clock
         self.roles = dict(DEFAULT_ROLES if roles is None else roles)
         self.boost = dict(DEFAULT_BOOST if boost is None else boost)
+        for name, level in self.boost.items():
+            if level not in LEVELS:
+                raise ValueError(f'提级配置非法：{name} -> {level}（可选 {LEVELS}）')
         self.labels = dict(CN_LABELS, **(labels or {}))
         self.streaks = {}      # 候选键 -> 连续处于可播报等级的帧数
         self.last_spoken = {}  # (等级, 类别) -> 上次播报时刻
@@ -117,7 +124,8 @@ class WarningEngine:
     def observe(self, dets, width, height):
         """处理一帧。返回 (标注后的目标列表, 播报或 None)。"""
         now = self.clock()
-        decorated, candidates = [], {}
+        decorated = []
+        frame_best = {}  # key -> 本帧该键的最优候选（同帧同键聚合，取等级更高/更近者）
         for det in dets:
             x1, y1, x2, y2 = det['xyxy']
             y2n = min(1.0, max(0.0, y2 / max(1, height)))
@@ -125,7 +133,7 @@ class WarningEngine:
             name = det.get('name', '')
             role = _role_of(name, self.roles)
             # quiet 角色不参与分级；其余按几何阈值分级
-            tier = None if ROLE_MIN_LEVEL[role] is None else tier_of(y2n, hn, self.boost.get(name))
+            tier = None if role in SILENT_ROLES else tier_of(y2n, hn, self.boost.get(name))
             item = dict(det)
             item['role'] = role
             item['tier'] = tier
@@ -135,49 +143,49 @@ class WarningEngine:
             if tier not in ('near', 'danger'):
                 continue
             key = (item.get('id'), name)
-            streak = self.streaks.get(key, 0) + 1
-            self.streaks[key] = streak
-            best = candidates.get(key)
+            cand = {'name': name, 'label': item['label'], 'tier': tier,
+                    'direction': item['direction'], 'id': item.get('id'),
+                    '_y2n': y2n, '_role': role}
+            best = frame_best.get(key)
             if best is None or LEVELS.index(tier) > LEVELS.index(best['tier']) or \
                     (tier == best['tier'] and y2n > best['_y2n']):
-                candidates[key] = {'name': name, 'label': item['label'], 'tier': tier,
-                                   'direction': item['direction'], 'id': item.get('id'),
-                                   '_streak': streak, '_y2n': y2n, '_role': role}
-        # 本帧没再出现的候选，连续计数清零
-        alive = {(d.get('id'), d.get('name', '')) for d in dets}
+                frame_best[key] = cand
+        # 本帧实际处于可播报等级的键各计一次；掉出等级的键立即清零，
+        # 保证"连续 N 帧处于该等级"的字面语义（near→远→near 不算连续）
+        for key, cand in frame_best.items():
+            self.streaks[key] = self.streaks.get(key, 0) + 1
+            cand['_streak'] = self.streaks[key]
         for key in list(self.streaks):
-            if key not in alive:
+            if key not in frame_best:
                 del self.streaks[key]
-        return decorated, self._announce(candidates, now)
+        return decorated, self._announce(frame_best, now)
 
-    def _announce(self, candidates, now):
-        if not candidates or (self.last_any is not None and now - self.last_any < self.min_gap):
+    def _announce(self, frame_best, now):
+        """按 危险→近→通行提示 排序逐候选尝试，取第一个通过自身冷却
+        （与全局最小间隔，危险级豁免）的候选；全部被挡则本帧不播报。"""
+        confirmed = []
+        for cand in frame_best.values():
+            if cand['_streak'] < self.need_frames:
+                continue
+            if cand['_role'] == 'obstacle':
+                confirmed.append((0 if cand['tier'] == 'danger' else 1, cand))
+            elif cand['_role'] == 'target':
+                confirmed.append((2, cand))
+        if not confirmed:
             return None
-        obstacles = [c for c in candidates.values()
-                     if c['_role'] == 'obstacle' and c['_streak'] >= self.need_frames]
-        target = None
-        if not obstacles:
-            targets = [c for c in candidates.values()
-                       if c['_role'] == 'target' and c['_streak'] >= self.need_frames]
-            if targets:
-                target = max(targets, key=lambda c: c['_y2n'])
-        chosen = None
-        for level in ('danger', 'near'):
-            pool = [c for c in obstacles if c['tier'] == level]
-            if pool:
-                chosen = max(pool, key=lambda c: c['_y2n'])
-                chosen = dict(chosen, level=level, interrupt=level == 'danger')
-                break
-        if chosen is None:
-            if target is None:
-                return None
-            chosen = dict(target, level='mid', interrupt=False)
-        last = self.last_spoken.get((chosen['level'], chosen['name']))
-        if last is not None and now - last < self.cooldowns[chosen['level']]:
-            return None
-        self.last_spoken[(chosen['level'], chosen['name'])] = now
-        self.last_any = now
-        return {'level': chosen['level'], 'name': chosen['name'], 'label': chosen['label'],
-                'id': chosen['id'], 'direction': chosen['direction'],
-                'text': voice_text(chosen['level'], chosen['direction'], chosen['label']),
-                'interrupt': chosen['interrupt']}
+        confirmed.sort(key=lambda pair: (pair[0], -pair[1]['_y2n']))
+        for _, cand in confirmed:
+            level = 'mid' if cand['_role'] == 'target' else cand['tier']
+            last = self.last_spoken.get((level, cand['name']))
+            if last is not None and now - last < self.cooldowns[level]:
+                continue  # 该候选自身冷却中，轮到次优候选
+            if level != 'danger' and self.last_any is not None and \
+                    now - self.last_any < self.min_gap:
+                continue  # 全局最小间隔只节流非危险级（危险可打断语义）
+            self.last_spoken[(level, cand['name'])] = now
+            self.last_any = now
+            return {'level': level, 'name': cand['name'], 'label': cand['label'],
+                    'id': cand['id'], 'direction': cand['direction'],
+                    'text': voice_text(level, cand['direction'], cand['label']),
+                    'interrupt': level == 'danger'}
+        return None

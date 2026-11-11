@@ -78,7 +78,8 @@ class DemoTests(unittest.TestCase):
             time.sleep(.05)
         self.assertEqual(live['status'],'completed')
         self.assertGreater(live['sequence'],0)
-        self.assertEqual(self.call('/api/stop',{})[0],200)
+        self.assertEqual(self.call('/api/stop',{'id':start['id']})[0],200)
+        self.assertEqual(self.call('/api/stop',{})[0],400)  # 空 id 拒绝无条件停止
 
     def test_missing_video_and_stale_session(self):
         self.assertEqual(self.call('/api/start',{'kind':'video','source':'missing'})[0],400)
