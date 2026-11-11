@@ -179,6 +179,10 @@ def main():
                    show=not args.no_show, need_frames=2, save_dir=args.save_warn)
     else:
         path = Path(source)
+        if path.suffix.lower() in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}:
+            run_source(detector, speaker, str(path), args.conf,
+                       show=not args.no_show, need_frames=2, save_dir=args.save_warn)
+            return
         if path.is_dir():
             images = sorted(p for p in path.iterdir()
                             if p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.webp'})
