@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 HERE = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from guide_demo.warning import WarningEngine
-MODELS = {'project': ROOT/'runs/detect/products_v2/weights/best.pt',
+MODELS = {'project': ROOT/'runs/detect/products_v3/weights/best.pt',
+          'v2': ROOT/'runs/detect/products_v2/weights/best.pt',
           'general': ROOT/'models/yolo26n.pt'}
 LABELS = {'bottle':'瓶／杯','chair':'椅子','door':'门','person':'人','car':'汽车',
           'bicycle':'自行车','motorcycle':'摩托车','bus':'公交车','truck':'卡车',

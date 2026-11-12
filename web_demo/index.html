@@ -137,7 +137,7 @@ footer{padding:12px 20px 20px;font-size:11px;color:#8a9a94;line-height:1.8;flex:
   <h2>识别设置</h2>
   <label class="f" for="model">识别模式</label>
   <select id="model"><option value="project">项目模型 · 瓶／杯、椅子、门</option><option value="general">通用模型 · 人、车辆等 80 类</option></select>
-  <div class="scope" id="scope">products_v2 模型：瓶／杯、椅子、门。门按通行提示，其余按障碍分级预警。</div>
+  <div class="scope" id="scope">项目模型 v3：瓶／杯、椅子、门。门按通行提示，其余按障碍分级预警。</div>
   <div class="range-head" style="margin-top:16px"><label class="f" for="confidence" style="margin:0">置信度阈值</label><output id="confValue">0.35</output></div>
   <input id="confidence" type="range" min="0.05" max="0.95" step="0.05" value="0.35">
   <p class="hint">调低可能检出更多目标，也可能增加误报。</p>

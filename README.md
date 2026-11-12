@@ -83,12 +83,18 @@ python -m guide_demo.cli_demo --source 目录 --no-show    # 批量图片调试
 
 | 模型 | 权重 | 类别 | 用途 |
 | --- | --- | --- | --- |
-| 项目模型（默认） | `runs/detect/products_v2/weights/best.pt`（未随仓库分发） | bottle / chair / door | 室内场景主模型，YOLO11s 微调 |
+| 项目模型（默认） | `runs/detect/products_v3/weights/best.pt`（未随仓库分发） | bottle / chair / door | 室内场景主模型，YOLO11s 微调，训练集 5055 张 |
+| 回退模型 | `runs/detect/products_v2/weights/best.pt`（未随仓库分发） | 同上 | 上一版，训练集 2370 张，请求带 `mode=v2` 即切 |
 | 通用模型 | `models/yolo26n.pt`（ultralytics 官方发布） | COCO 80 类 | 无自训练权重时的兜底 |
 
-权重文件超过 GitHub 单文件限制，未随仓库分发：把 `products_v2/weights/best.pt` 放到
-`web_demo/` 上一级的 `runs/detect/products_v2/weights/` 即可；没有权重时也可用任意
+权重文件超过 GitHub 单文件限制，未随仓库分发：把 `products_v3/weights/best.pt` 放到
+`web_demo/` 上一级的 `runs/detect/products_v3/weights/` 即可；没有权重时也可用任意
 YOLO 模型替换（改 `web_demo/app.py` 顶部的 `MODELS` 字典）。
+
+> 指标口径：`products_v2`/`v3` 自带的 49 张 test 与训练同源（同一拍摄场次横跨三个划分），
+> 上面测出的 mAP50 0.55 属虚高，不作数。重建 1452 张去泄漏测试集后，v2 与 v3 的 mAP50
+> 分别为 0.2917 与 0.2887，**泛化持平**；v3 的收益在近景椅子召回（0.673 → 0.829），
+> 远景目标两版都失效。所以 README 不写「准确率」，界面也只写能力边界。
 
 ### 用自己的视频训练（第二轮流程）
 
@@ -104,7 +110,7 @@ python scripts/prepare_round2.py \
 
 输出到 `datasets/team_video_round2_<日期>/`（已存在即拒绝，不覆盖旧成果），
 含 `data.yaml` 与 `build_manifest.json`（划分依据、类别分布、哈希查重结果）。
-设计依据见 [docs/research-notes.md](docs/research-notes.md)。
+设计依据见 [docs/research-notes.md](docs/research-notes.md)，数据盘点、干净测试集口径与下次重训的完整流程见 [docs/training-data.md](docs/training-data.md)。
 
 ## 项目结构
 
